@@ -1,2 +1,6 @@
 venv
 .DS_Store
+acc_curve.png
+loss_curve.png
+__pycache__/
+saved_params.npz
