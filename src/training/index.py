@@ -27,6 +27,8 @@ from src.model.index import forward, he_init, zeros, load_mnist_subset
 from src.gradients.index import backward, one_hot
 import matplotlib.pyplot as plt
 
+CHECKPOINT_PATH = "saved_params.npz"
+
 # ----------------------- Loss & metrics -----------------------
 
 def cross_entropy_loss(probs: np.ndarray, Y_onehot: np.ndarray) -> float:
@@ -41,6 +43,43 @@ def accuracy_from_probs(probs: np.ndarray, labels: np.ndarray) -> float:
 
 
 # ----------------------- Training routine -----------------------
+
+def save_checkpoint(path: str, params: dict, epoch: int):
+  """Save parameters and metadata to a .npz file atomically.
+
+
+  We write to a temporary file then rename to avoid partial files.
+  """
+  tmp_path = path + ".tmp"
+  # Prepare arrays to save
+  np.savez(tmp_path,
+  W1=params['W1'], b1=params['b1'], W2=params['W2'], b2=params['b2'],
+  epoch=np.array(epoch, dtype=np.int32))
+  # atomic replace
+  try:
+    os.replace(tmp_path + '.npy', tmp_path + '.npy')
+  except Exception:
+  # np.savez creates .npz directly; just rename/move
+    pass
+  # move tmp to final (np.savez created a .npz file at tmp_path)
+  final_tmp = tmp_path + ".npz"
+  if os.path.exists(final_tmp):
+    os.replace(final_tmp, path)
+  else:
+  # if np.savez wrote directly to tmp_path without .npz suffix
+    if os.path.exists(tmp_path):
+      os.replace(tmp_path, path)
+
+
+
+
+def load_checkpoint(path: str):
+  """Load parameters and metadata from a checkpoint. Returns (params, epoch) or (None, 0)."""
+  if not os.path.exists(path):
+    return None
+  data = np.load(path)
+  params : Dict[str, np.ndarray] = {'W1': data['W1'], 'b1': data['b1'], 'W2': data['W2'], 'b2': data['b2']}
+  return params
 
 def train(
     X_train: np.ndarray,
@@ -58,13 +97,19 @@ def train(
     seed: int = 123,
 ):
     rng = np.random.RandomState(seed)
-
-    # initialize parameters
-    W1 = he_init(input_dim, hidden_dim, seed=seed).astype(np.float32)
-    b1 = zeros((1, hidden_dim)).astype(np.float32)
-    W2 = he_init(hidden_dim, output_dim, seed=seed+1).astype(np.float32)
-    b2 = zeros((1, output_dim)).astype(np.float32)
-    params: Dict[str, np.ndarray] = {'W1': W1, 'b1': b1, 'W2': W2, 'b2': b2}
+    from typing import Optional
+    loaded_params: Optional[Dict[str, np.ndarray]] = load_checkpoint("saved_params.npz")
+    if loaded_params:
+      print(f"Resuming training from checkpoint {CHECKPOINT_PATH}")
+      print(f"First weights: {loaded_params['W1'].ravel()[:5]}")
+      params: Dict[str, np.ndarray] = loaded_params
+    else:
+      # initialize parameters
+      W1 = he_init(input_dim, hidden_dim, seed=seed).astype(np.float32)
+      b1 = zeros((1, hidden_dim)).astype(np.float32)
+      W2 = he_init(hidden_dim, output_dim, seed=seed+1).astype(np.float32)
+      b2 = zeros((1, output_dim)).astype(np.float32)
+      params: Dict[str, np.ndarray] = {'W1': W1, 'b1': b1, 'W2': W2, 'b2': b2}
 
     n_train = X_train.shape[0]
     steps_per_epoch = max(1, n_train // batch_size)
@@ -128,8 +173,8 @@ def train(
     print(f"\nTraining finished in {time.time() - start_time:.1f}s. Test loss {test_loss:.4f}, Test acc {test_acc:.4f}")
 
     # save parameters
-    np.savez('saved_params.npz', W1=params['W1'], b1=params['b1'], W2=params['W2'], b2=params['b2'])
-    print('Saved parameters to saved_params.npz')
+    np.savez(CHECKPOINT_PATH, W1=params['W1'], b1=params['b1'], W2=params['W2'], b2=params['b2'])
+    print(f'Saved parameters to {CHECKPOINT_PATH}')
 
     # simple plots
     plt.figure()
@@ -156,7 +201,7 @@ def train(
 if __name__ == '__main__':
     # load data (small subset for quick runs; change n_train param to use full dataset)
     X_train, y_train, X_val, y_val, X_test, y_test = load_mnist_subset(n_train=10000, n_val=2000)
-
+    
     params, history = train(
         X_train, y_train, X_val, y_val, X_test, y_test,
         input_dim=28*28,
@@ -164,7 +209,7 @@ if __name__ == '__main__':
         output_dim=10,
         epochs=20,
         batch_size=128,
-        lr=0.1,
+        lr=0.5,
         seed=123,
     )
 
