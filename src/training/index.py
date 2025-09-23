@@ -209,7 +209,7 @@ if __name__ == '__main__':
         output_dim=10,
         epochs=20,
         batch_size=128,
-        lr=0.5,
+        lr=0.1,
         seed=123,
     )
 
