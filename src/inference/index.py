@@ -11,7 +11,9 @@ Functions:
 This file is framework-agnostic and contains no web server logic.
 """
 
+import sys
 import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 import numpy as np
 from PIL import Image, ImageOps
 from src.model.index import forward
@@ -20,43 +22,93 @@ from src.model.index import forward
 CHECKPOINT_PATH = "saved_params.npz"
 
 
-def preprocess_image_pil(img: Image.Image) -> np.ndarray:
-    """Convert PIL image to flattened MNIST-like 28x28 numpy array (shape (1,784)).
-
-    Steps:
-      - convert to grayscale
-      - trim whitespace (bounding box) if possible
-      - resize keeping aspect (pad to square)
-      - invert if necessary to match MNIST (white stroke on black)
-      - normalize to [0,1]
-      - flatten to shape (1, 784)
+def preprocess_image_pil(img: Image.Image, debug_save: str | None = None) -> np.ndarray:
     """
-    img = img.convert("L")
-    arr = np.array(img)
+    Robust preprocessing (Pillow + NumPy only) converting an input PIL image
+    into a MNIST-like flattened array shape (1, 784), values in [0,1].
 
-    # Decide if inversion is needed: MNIST digits are bright on dark background
-    if np.median(arr) > 127:
+    debug_save: optional path to save the final 28x28 image for debugging.
+    """
+    # 1) fix EXIF orientation, convert to grayscale
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+    img = img.convert("L")
+
+    # 2) convert to numpy array
+    arr = np.array(img).astype(np.uint8)
+
+    # 3) estimate background using border sampling (robust for screenshots)
+    top = arr[0, :]
+    bottom = arr[-1, :]
+    left = arr[:, 0]
+    right = arr[:, -1]
+    border_vals = np.concatenate([top, bottom, left, right])
+    bg_median = np.median(border_vals)
+
+    # If borders are bright, invert so the digit/foreground becomes bright
+    if bg_median > 127:
         arr = 255 - arr
         img = Image.fromarray(arr)
 
-    # Crop to bounding box of content
-    bbox = ImageOps.invert(img).getbbox()
-    if bbox:
-        img = img.crop(bbox)
+    # 4) threshold to get mask (robust but simple)
+    maxv = arr.max() if arr.size else 0
+    thr = max(maxv * 0.15, np.mean(arr) * 0.5)
+    mask = arr > thr
+    if mask.sum() == 0:
+        thr = np.mean(arr) * 0.3
+        mask = arr > thr
 
-    # Create square canvas containing the image centered
-    max_side = max(img.size)
-    square = Image.new('L', (max_side, max_side), color=0)
-    square.paste(img, ((max_side - img.size[0]) // 2, (max_side - img.size[1]) // 2))
+    # 5) get bbox from mask
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        left, top, right, bottom = 0, 0, arr.shape[1], arr.shape[0]
+    else:
+        left, top, right, bottom = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
 
-    # Resize to 20x20 and paste into 28x28 to mimic MNIST centering
-    small = square.resize((20, 20)) # type: ignore
+    # small pad to avoid clipped strokes
+    pad = 2
+    left = max(0, left - pad)
+    top = max(0, top - pad)
+    right = min(arr.shape[1], right + pad)
+    bottom = min(arr.shape[0], bottom + pad)
+
+    # 6) crop and make square canvas, center the crop
+    crop = arr[top:bottom, left:right]
+    if crop.size == 0:
+        crop = arr
+    h, w = crop.shape
+    side = max(h, w)
+    canvas = np.zeros((side, side), dtype=np.uint8)
+    y0 = (side - h) // 2
+    x0 = (side - w) // 2
+    canvas[y0:y0+h, x0:x0+w] = crop
+
+    # 7) resize to 20x20 (high-quality) and paste into 28x28 with 4-pixel margin
+    small = Image.fromarray(canvas).resize((20, 20), Image.LANCZOS) # type: ignore
     final = Image.new('L', (28, 28), color=0)
     final.paste(small, (4, 4))
 
-    arr = np.array(final).astype(np.float32) / 255.0
-    flat = arr.reshape(1, -1)
-    return flat
+    # 8) center by intensity (approx center-of-mass)
+    final_arr = np.array(final).astype(np.float32)
+    total = final_arr.sum()
+    if total > 0:
+        rows = final_arr.sum(axis=1)
+        cols = final_arr.sum(axis=0)
+        cy = (np.arange(28) * rows).sum() / total
+        cx = (np.arange(28) * cols).sum() / total
+        shiftx = int(round(14 - cx))
+        shifty = int(round(14 - cy))
+        final_arr = np.roll(final_arr, shift=(shifty, shiftx), axis=(0, 1))
+
+    # 9) normalize to [0,1] and flatten
+    final_arr = np.clip(final_arr, 0, 255).astype(np.float32) / 255.0
+
+    if debug_save:
+        Image.fromarray((final_arr * 255).astype(np.uint8)).save(debug_save)
+
+    return final_arr.reshape(1, -1)
 
 
 def load_params(path: str = CHECKPOINT_PATH):
@@ -84,11 +136,10 @@ def predict_from_image_path(image_path: str, checkpoint_path: str = CHECKPOINT_P
 # CLI helper when running this module directly
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--img', required=True, help='Path to image file')
-    parser.add_argument('--checkpoint', default=CHECKPOINT_PATH)
-    args = parser.parse_args()
-
-    pred, probs = predict_from_image_path(args.img, args.checkpoint)
+    # args = parser.parse_args()
+    args = {}
+    args["img"] = "image.webp"
+    img = Image.open(args["img"])
+    pred, probs = predict_from_image_path(args["img"], "saved_params.npz")
     print('Predicted:', pred)
     print('Top probs:', np.argsort(probs)[-3:][::-1], probs[np.argsort(probs)[-3:][::-1]])
